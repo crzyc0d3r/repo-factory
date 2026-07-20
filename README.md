@@ -1,6 +1,6 @@
 # repo-factory
 
-Push-triggered publisher. Pushing a branch named `incoming/<repo-name>` to this
+Push-triggered publisher. Creating a branch named `incoming/<repo-name>` to this
 repository makes the `publish` workflow:
 
 1. create the repo `<repo-name>` under this account if it does not exist

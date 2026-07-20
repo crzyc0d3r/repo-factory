@@ -1,34 +1,42 @@
 name: publish
 
-# Any branch pushed as incoming/<repo-name> gets published:
+# Creating a branch named incoming/<repo-name> gets it published:
 #   1. the target repo <repo-name> is created if it does not exist
 #      (description read from .repo-meta.json at the branch root),
 #   2. the branch content (minus .repo-meta.json) is force-pushed to
 #      the target repo's main,
 #   3. the incoming branch is deleted.
 #
+# Trigger is `create` (not `push`) deliberately: create-event workflows run
+# from the DEFAULT branch's workflow file, so incoming branches don't need
+# to carry .github/workflows themselves. Incoming branches are always newly
+# created, because step 3 deletes them after every run. If a stale
+# incoming/* branch ever survives a failed run, delete it and push again.
+#
 # Requires one repository secret: REPO_CREATE_TOKEN — a classic PAT
 # with `repo` scope (used to create the target repo and push to it).
 
-on:
-  push:
-    branches:
-      - 'incoming/**'
+on: create
 
 permissions:
   contents: write
 
 jobs:
   publish:
+    if: github.event.ref_type == 'branch' && startsWith(github.event.ref, 'incoming/')
     runs-on: ubuntu-latest
     steps:
       - name: Check out incoming branch
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.ref }}
 
       - name: Derive repo name and description
         id: meta
+        env:
+          RAW_REF: ${{ github.event.ref }}
         run: |
-          BRANCH="${GITHUB_REF#refs/heads/}"
+          BRANCH="${RAW_REF#refs/heads/}"
           REPO_NAME="${BRANCH#incoming/}"
           echo "repo=$REPO_NAME" >> "$GITHUB_OUTPUT"
           DESC=""
@@ -88,6 +96,7 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RAW_REF: ${{ github.event.ref }}
         run: |
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            --delete "${GITHUB_REF#refs/heads/}" || true
+            --delete "${RAW_REF#refs/heads/}" || true
