@@ -41,12 +41,16 @@ jobs:
     steps:
       - name: Check out factory
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Publish all incoming/* branches
         env:
           GH_TOKEN: ${{ secrets.REPO_CREATE_TOKEN }}
           FACTORY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The runner injects `bash -e`; we handle errors per-project instead.
+          set +e
           set -u
           if [ -z "$GH_TOKEN" ]; then
             echo "::error::Secret REPO_CREATE_TOKEN is not set on this repository."
@@ -55,7 +59,7 @@ jobs:
           git config user.name  "${GITHUB_REPOSITORY_OWNER}"
           git config user.email "${GITHUB_REPOSITORY_OWNER}@users.noreply.github.com"
 
-          git fetch -q origin '+refs/heads/incoming/*:refs/incoming/*' || true
+          git fetch -q origin '+refs/heads/incoming/*:refs/incoming/*'
           REFS=$(git for-each-ref --format='%(refname)' refs/incoming/)
           if [ -z "$REFS" ]; then
             echo "Nothing to publish (no incoming/* branches)."
@@ -66,7 +70,7 @@ jobs:
           for REF in $REFS; do
             NAME="${REF#refs/incoming/}"
             echo "::group::Publishing $NAME"
-            (
+            if (
               set -e
               git checkout -q --detach "$REF"
               DESC=""
@@ -85,8 +89,7 @@ jobs:
               elif [ "$STATUS" = "422" ]; then
                 echo "Target repo already exists — publishing into it."
               else
-                echo "::error::Repo creation for $NAME returned HTTP $STATUS"
-                cat /tmp/resp.json
+                echo "::error::Repo creation for $NAME returned HTTP $STATUS: $(cat /tmp/resp.json)"
                 exit 1
               fi
               if [ -f .repo-meta.json ]; then
@@ -97,19 +100,18 @@ jobs:
                 "https://${GITHUB_REPOSITORY_OWNER}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/${NAME}.git" \
                 HEAD:refs/heads/main
               echo "Published: https://github.com/${GITHUB_REPOSITORY_OWNER}/${NAME}"
-            )
-            RC=$?
-            if [ $RC -eq 0 ]; then
+            ); then
               git push -q "https://x-access-token:${FACTORY_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
                 --delete "incoming/${NAME}" || true
             else
+              echo "::error::Publishing $NAME failed — branch kept for the next sweep; see this run's log group for details."
               FAILED="$FAILED $NAME"
             fi
-            git checkout -q main
+            git reset --hard -q; git clean -fdq; git checkout -q main || true
             echo "::endgroup::"
           done
 
           if [ -n "$FAILED" ]; then
-            echo "::error::Failed to publish:$FAILED (their incoming branches were kept for the next sweep)"
+            echo "::error::Failed to publish:$FAILED"
             exit 1
           fi
