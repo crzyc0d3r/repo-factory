@@ -1,0 +1,93 @@
+name: publish
+
+# Any branch pushed as incoming/<repo-name> gets published:
+#   1. the target repo <repo-name> is created if it does not exist
+#      (description read from .repo-meta.json at the branch root),
+#   2. the branch content (minus .repo-meta.json) is force-pushed to
+#      the target repo's main,
+#   3. the incoming branch is deleted.
+#
+# Requires one repository secret: REPO_CREATE_TOKEN — a classic PAT
+# with `repo` scope (used to create the target repo and push to it).
+
+on:
+  push:
+    branches:
+      - 'incoming/**'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out incoming branch
+        uses: actions/checkout@v4
+
+      - name: Derive repo name and description
+        id: meta
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          REPO_NAME="${BRANCH#incoming/}"
+          echo "repo=$REPO_NAME" >> "$GITHUB_OUTPUT"
+          DESC=""
+          if [ -f .repo-meta.json ]; then
+            DESC=$(jq -r '.description // ""' .repo-meta.json)
+          fi
+          {
+            echo "description<<META_EOF"
+            echo "$DESC"
+            echo "META_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create target repo if missing
+        env:
+          GH_TOKEN: ${{ secrets.REPO_CREATE_TOKEN }}
+          REPO: ${{ steps.meta.outputs.repo }}
+          DESC: ${{ steps.meta.outputs.description }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Secret REPO_CREATE_TOKEN is not set on this repository."
+            exit 1
+          fi
+          BODY=$(jq -n --arg n "$REPO" --arg d "$DESC" '{name:$n, description:$d, private:false}')
+          STATUS=$(curl -s -o /tmp/resp.json -w "%{http_code}" -X POST \
+            https://api.github.com/user/repos \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            --data "$BODY")
+          if [ "$STATUS" = "201" ]; then
+            echo "Target repo created."
+          elif [ "$STATUS" = "422" ]; then
+            echo "Target repo already exists — publishing into it."
+          else
+            echo "::error::Repo creation returned HTTP $STATUS"
+            cat /tmp/resp.json
+            exit 1
+          fi
+
+      - name: Push content to target main
+        env:
+          GH_TOKEN: ${{ secrets.REPO_CREATE_TOKEN }}
+          REPO: ${{ steps.meta.outputs.repo }}
+        run: |
+          git config user.name  "${GITHUB_REPOSITORY_OWNER}"
+          git config user.email "${GITHUB_REPOSITORY_OWNER}@users.noreply.github.com"
+          if [ -f .repo-meta.json ]; then
+            git rm -q .repo-meta.json
+            git commit -q --amend --no-edit
+          fi
+          git push --force \
+            "https://${GITHUB_REPOSITORY_OWNER}:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}.git" \
+            HEAD:refs/heads/main
+          echo "Published: https://github.com/${GITHUB_REPOSITORY_OWNER}/${REPO}"
+
+      - name: Delete incoming branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            --delete "${GITHUB_REF#refs/heads/}" || true
